@@ -697,3 +697,21 @@ def get_network(wallet: str):
                     })
 
     return {"nodes": nodes[:20], "edges": edges[:30]}
+
+@app.get("/debug/{wallet}")
+def debug_wallet(wallet: str):
+    txs = get_transactions(wallet)
+    if not txs:
+        return {"count": 0, "sample": None}
+    sample = txs[0] if txs else {}
+    return {
+        "actual_count": len(txs),
+        "first_tx_keys": list(sample.keys()) if sample else [],
+        "first_tx_type": sample.get("type", "N/A"),
+        "native_transfers_count": len(sample.get("nativeTransfers", [])),
+        "token_transfers_count": len(sample.get("tokenTransfers", [])),
+        "account_data_count": len(sample.get("accountData", [])),
+        "sample_native": sample.get("nativeTransfers", [])[:2],
+        "sample_token": sample.get("tokenTransfers", [])[:2],
+        "timestamp": sample.get("timestamp", "N/A"),
+    }
