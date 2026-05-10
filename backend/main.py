@@ -520,14 +520,38 @@ def get_top_counterparties(txs: list, wallet: str) -> list:
     for tx in txs:
         if not isinstance(tx, dict): continue
         for transfer in tx.get("nativeTransfers", []):
-            addr = transfer.get("toUserAccount", "") or transfer.get("fromUserAccount", "")
-            if addr and addr != wallet:
+            for key in ["toUserAccount", "fromUserAccount"]:
+                addr = transfer.get(key, "")
+                if addr and addr != wallet:
+                    counts[addr] = counts.get(addr, 0) + 1
+        for transfer in tx.get("tokenTransfers", []):
+            for key in ["toUserAccount", "fromUserAccount"]:
+                addr = transfer.get(key, "")
+                if addr and addr != wallet:
+                    counts[addr] = counts.get(addr, 0) + 1
+        for acc in tx.get("accountData", []):
+            addr = acc.get("account", "")
+            if addr and addr != wallet and acc.get("nativeBalanceChange", 0) != 0:
                 counts[addr] = counts.get(addr, 0) + 1
     top = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:5]
     return [{"address": a[:8] + "..." + a[-4:], "full": a, "interactions": c} for a, c in top]
 
 def get_tx_type_breakdown(txs: list) -> dict:
-    types = Counter(tx.get("type", "UNKNOWN") for tx in txs if isinstance(tx, dict))
+    types = Counter()
+    for tx in txs:
+        if not isinstance(tx, dict): continue
+        tx_type = tx.get("type", "UNKNOWN")
+        readable = {
+            "UNKNOWN": "Complex DeFi",
+            "TRANSFER": "SOL Transfer",
+            "SWAP": "Token Swap",
+            "NFT_SALE": "NFT Sale",
+            "NFT_MINT": "NFT Mint",
+            "NFT_BID": "NFT Bid",
+            "BURN": "Token Burn",
+            "STAKE_SOL": "SOL Staking",
+        }.get(tx_type, tx_type)
+        types[readable] += 1
     return dict(types.most_common(6))
 
 def get_risk_label(score: int) -> str:
@@ -632,12 +656,28 @@ def get_network(wallet: str):
     nodes = [{"id": wallet, "type": "main", "label": wallet[:8] + "..."}]
     edges = []
     seen = set()
-    for tx in txs[:30]:
+
+    for tx in txs[:50]:
         if not isinstance(tx, dict): continue
-        for transfer in tx.get("nativeTransfers", []):
-            src = transfer.get("fromUserAccount", "")
-            dst = transfer.get("toUserAccount", "")
-            if src and dst and src != dst:
+
+        all_transfers = []
+
+        for t in tx.get("nativeTransfers", []):
+            src = t.get("fromUserAccount", "")
+            dst = t.get("toUserAccount", "")
+            amt = t.get("amount", 0) / 1e9
+            if src and dst:
+                all_transfers.append((src, dst, round(amt, 4), "SOL"))
+
+        for t in tx.get("tokenTransfers", []):
+            src = t.get("fromUserAccount", "")
+            dst = t.get("toUserAccount", "")
+            amt = t.get("tokenAmount", 0)
+            if src and dst:
+                all_transfers.append((src, dst, round(float(amt), 2), "TOKEN"))
+
+        for src, dst, amt, type_ in all_transfers:
+            if src != dst:
                 for addr in [src, dst]:
                     if addr != wallet and addr not in seen:
                         seen.add(addr)
@@ -652,6 +692,8 @@ def get_network(wallet: str):
                     edges.append({
                         "source": src,
                         "target": dst,
-                        "amount": round(transfer.get("amount", 0) / 1e9, 4)
+                        "amount": amt,
+                        "type": type_
                     })
+
     return {"nodes": nodes[:20], "edges": edges[:30]}
