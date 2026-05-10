@@ -450,7 +450,7 @@ ${Object.entries(r.tx_type_breakdown).map(([t,c])=>`<div class="row"><span>${t}<
               )}
             </div>
 
-            {!connected && (
+            {false && (
               <div style={{ padding: "16px 24px", background: "rgba(153,69,255,0.06)", border: "1px solid #9945FF33", borderRadius: "14px", display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px" }}>
                 <div>
                   <div style={{ fontSize: "14px", color: "#9945FF", fontWeight: "600", marginBottom: "4px" }}>🔒 Connect Phantom Wallet for Premium</div>

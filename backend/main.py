@@ -36,6 +36,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "5d80f768-058a-490d-bc3f-701969baec2c")
