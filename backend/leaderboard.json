@@ -1,0 +1,30 @@
+[
+  {
+    "wallet": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    "risk_score": 51,
+    "risk_label": "MEDIUM RISK \ud83d\udfe1",
+    "profile": "Bot / Automated",
+    "transaction_count": 100
+  },
+  {
+    "wallet": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+    "risk_score": 51,
+    "risk_label": "MEDIUM RISK \ud83d\udfe1",
+    "profile": "Bot / Automated",
+    "transaction_count": 100
+  },
+  {
+    "wallet": "69aiAKU3uJMxMLRkUEGFNt6nQ43PiVimE4ZbErJ7VSM1",
+    "risk_score": 48,
+    "risk_label": "MEDIUM RISK \ud83d\udfe1",
+    "profile": "Bot / Automated",
+    "transaction_count": 100
+  },
+  {
+    "wallet": "FVnv5qH7dsrBzEDwJ8dN2m9PFtKTBAQFtqWF3M9LpwMg",
+    "risk_score": 52,
+    "risk_label": "MEDIUM RISK \ud83d\udfe1",
+    "profile": "Bot / Automated",
+    "transaction_count": 100
+  }
+]
