@@ -370,7 +370,7 @@ def score_rug_pull_ml(features: dict, txs: list, wallet: str) -> dict:
     if total_outflow > 1.0 and total_inflow == 0:
         score += 25
         flags.append(f"⚠️ Pure outflow wallet — {total_outflow:.2f} SOL out, nothing in")
-    elif total_outflow > 0 and total_inflow > 0 and flow_ratio > 8:
+    elif total_outflow > 0 and total_inflow > 0 and features.get("flow_ratio", 0) > 8:
         score += 20
         flags.append(f"⚠️ Heavy outflow dominance ({features['flow_ratio']:.1f}x ratio)")
 
