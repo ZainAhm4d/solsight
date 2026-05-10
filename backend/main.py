@@ -42,23 +42,38 @@ app.add_middleware(
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "5d80f768-058a-490d-bc3f-701969baec2c")
 HELIUS_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
-# ── DATA FETCHING ─────────────────────────────────────────────────────────────
-
 def get_transactions(wallet: str):
-    """Fetch transactions - returns actual count, not always 100"""
+    """
+    Fetch transactions in pages until we get all of them or hit 100.
+    Returns the ACTUAL number of transactions the wallet has made.
+    """
     url = f"https://api.helius.xyz/v0/addresses/{wallet}/transactions"
-    params = {"api-key": HELIUS_API_KEY, "limit": 100}
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                print(f"Fetched {len(data)} actual transactions for {wallet[:8]}")
-                return data
-        return []
-    except Exception as e:
-        print(f"Fetch error: {e}")
-        return []
+    all_txs = []
+    last_signature = None
+
+    for _ in range(2):  # max 2 pages of 50 = 100 txs
+        params = {"api-key": HELIUS_API_KEY, "limit": 50}
+        if last_signature:
+            params["before"] = last_signature
+        try:
+            r = requests.get(url, params=params, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                if not isinstance(data, list) or len(data) == 0:
+                    break
+                all_txs.extend(data)
+                if len(data) < 50:
+                    # Got fewer than requested = no more transactions
+                    break
+                last_signature = data[-1].get("signature")
+            else:
+                break
+        except Exception as e:
+            print(f"Fetch error: {e}")
+            break
+
+    print(f"Actual transactions fetched: {len(all_txs)} for {wallet[:8]}")
+    return all_txs
 
 def get_sol_balance(wallet: str) -> float:
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [wallet]}
@@ -70,77 +85,59 @@ def get_sol_balance(wallet: str) -> float:
         return 0.0
 
 def get_wallet_age(txs: list) -> dict:
-    """Get REAL first seen and last active from actual transaction timestamps"""
     if not txs:
         return {"first_seen": "Unknown", "last_active": "Unknown", "age_days": 0}
-
-    # Filter only valid timestamps
-    timestamps = []
-    for tx in txs:
-        if isinstance(tx, dict):
-            ts = tx.get("timestamp")
-            if ts and isinstance(ts, (int, float)) and ts > 0:
-                timestamps.append(int(ts))
-
+    timestamps = [int(tx["timestamp"]) for tx in txs
+                  if isinstance(tx, dict) and tx.get("timestamp") and int(tx.get("timestamp", 0)) > 0]
     if not timestamps:
         return {"first_seen": "Unknown", "last_active": "Unknown", "age_days": 0}
-
     oldest = min(timestamps)
     newest = max(timestamps)
     age_days = max(0, (newest - oldest) // 86400)
-
-    print(f"Wallet timestamps: oldest={oldest} ({datetime.fromtimestamp(oldest)}), newest={newest} ({datetime.fromtimestamp(newest)})")
-
     return {
         "first_seen": datetime.fromtimestamp(oldest).strftime("%b %d, %Y"),
         "last_active": datetime.fromtimestamp(newest).strftime("%b %d, %Y"),
         "age_days": age_days
     }
 
-# ── FEATURE EXTRACTION ────────────────────────────────────────────────────────
-
 def extract_features(txs: list, wallet: str) -> dict:
-    """Extract numerical features from raw transactions"""
-    n = len(txs)  # ACTUAL count, not 100
-
+    n = len(txs)
     if n == 0:
         return {"n_transactions": 0}
 
-    # 1. Temporal features
-    timestamps = []
-    for tx in txs:
-        if isinstance(tx, dict):
-            ts = tx.get("timestamp")
-            if ts and isinstance(ts, (int, float)) and ts > 0:
-                timestamps.append(int(ts))
-
-    timestamps.sort(reverse=True)
+    # Temporal features
+    timestamps = sorted([int(tx["timestamp"]) for tx in txs
+                         if isinstance(tx, dict) and tx.get("timestamp")
+                         and int(tx.get("timestamp", 0)) > 0], reverse=True)
 
     inter_arrival_times = []
     if len(timestamps) > 1:
-        inter_arrival_times = [timestamps[i] - timestamps[i+1]
-                               for i in range(len(timestamps)-1)
-                               if timestamps[i] - timestamps[i+1] >= 0]
+        inter_arrival_times = [abs(timestamps[i] - timestamps[i+1])
+                               for i in range(len(timestamps)-1)]
 
     avg_iat = float(np.mean(inter_arrival_times)) if inter_arrival_times else 0
     std_iat = float(np.std(inter_arrival_times)) if inter_arrival_times else 0
-    min_iat = float(np.min(inter_arrival_times)) if inter_arrival_times else 0
     cv_iat = std_iat / avg_iat if avg_iat > 0 else 0
 
-    # 2. Volume features
+    if len(inter_arrival_times) > 1:
+        r_val = std_iat / avg_iat if avg_iat > 0 else 0
+        burstiness = (r_val - 1) / (r_val + 1) if (r_val + 1) != 0 else 0
+    else:
+        burstiness = 0
+
+    # Volume features — only count meaningful transfers (> 0.01 SOL)
     amounts, outflow_amounts, inflow_amounts = [], [], []
     for tx in txs:
         if not isinstance(tx, dict): continue
         for transfer in tx.get("nativeTransfers", []):
             amt = transfer.get("amount", 0) / 1e9
-            if amt > 0:
+            if amt > 0.01:  # ignore dust/fees
                 amounts.append(amt)
                 if transfer.get("fromUserAccount") == wallet:
                     outflow_amounts.append(amt)
                 elif transfer.get("toUserAccount") == wallet:
                     inflow_amounts.append(amt)
 
-    total_volume = sum(amounts)
     total_outflow = sum(outflow_amounts)
     total_inflow = sum(inflow_amounts)
     flow_ratio = total_outflow / total_inflow if total_inflow > 0 else float(total_outflow > 0)
@@ -148,11 +145,18 @@ def extract_features(txs: list, wallet: str) -> dict:
     std_tx_size = float(np.std(amounts)) if amounts else 0
     max_tx_size = float(np.max(amounts)) if amounts else 0
 
-    # 3. Counterparty features
+    # Counterparty features — use token transfers too
     all_counterparties = []
     for tx in txs:
         if not isinstance(tx, dict): continue
         for transfer in tx.get("nativeTransfers", []):
+            amt = transfer.get("amount", 0) / 1e9
+            if amt > 0.01:
+                for key in ["fromUserAccount", "toUserAccount"]:
+                    addr = transfer.get(key, "")
+                    if addr and addr != wallet:
+                        all_counterparties.append(addr)
+        for transfer in tx.get("tokenTransfers", []):
             for key in ["fromUserAccount", "toUserAccount"]:
                 addr = transfer.get(key, "")
                 if addr and addr != wallet:
@@ -167,14 +171,13 @@ def extract_features(txs: list, wallet: str) -> dict:
     counterparty_entropy = float(-np.sum(cp_probs * np.log2(cp_probs + 1e-10)))
     most_frequent_ratio = max(cp_counts.values()) / max(total_interactions, 1) if cp_counts else 0
 
-    # 4. Transaction type features
+    # TX type features
     tx_types = Counter(tx.get("type", "UNKNOWN") for tx in txs if isinstance(tx, dict))
     swap_ratio = tx_types.get("SWAP", 0) / max(n, 1)
-    transfer_ratio = tx_types.get("TRANSFER", 0) / max(n, 1)
     failed_count = sum(1 for tx in txs if isinstance(tx, dict) and tx.get("transactionError"))
     failed_ratio = failed_count / max(n, 1)
 
-    # 5. Program features
+    # Program features
     program_ids = []
     pumpfun = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
     pumpfun_count = 0
@@ -188,25 +191,15 @@ def extract_features(txs: list, wallet: str) -> dict:
                     pumpfun_count += 1
 
     program_counts = Counter(program_ids)
-    unique_programs = len(program_counts)
     top_program_ratio = max(program_counts.values()) / max(len(program_ids), 1) if program_counts else 0
     pumpfun_ratio = pumpfun_count / max(n, 1)
-
-    # 6. Burstiness
-    if len(inter_arrival_times) > 1:
-        r_val = std_iat / avg_iat if avg_iat > 0 else 0
-        burstiness = (r_val - 1) / (r_val + 1) if (r_val + 1) != 0 else 0
-    else:
-        burstiness = 0
 
     return {
         "n_transactions": n,
         "avg_inter_arrival": avg_iat,
         "std_inter_arrival": std_iat,
-        "min_inter_arrival": min_iat,
         "cv_inter_arrival": cv_iat,
         "burstiness": burstiness,
-        "total_volume": total_volume,
         "total_outflow": total_outflow,
         "total_inflow": total_inflow,
         "flow_ratio": flow_ratio,
@@ -218,14 +211,10 @@ def extract_features(txs: list, wallet: str) -> dict:
         "counterparty_entropy": counterparty_entropy,
         "most_frequent_ratio": most_frequent_ratio,
         "swap_ratio": swap_ratio,
-        "transfer_ratio": transfer_ratio,
         "failed_ratio": failed_ratio,
-        "unique_programs": unique_programs,
         "top_program_ratio": top_program_ratio,
         "pumpfun_ratio": pumpfun_ratio,
     }
-
-# ── ML SCORING ENGINES ────────────────────────────────────────────────────────
 
 def score_bot_behavior_ml(features: dict, txs: list) -> dict:
     score = 0
@@ -234,11 +223,9 @@ def score_bot_behavior_ml(features: dict, txs: list) -> dict:
     n = features.get("n_transactions", 0)
 
     if n == 0:
-        return {"score": 0, "flags": ["✅ No transaction data to analyze"], "evidence": {}}
-
-    # Need minimum transactions for meaningful analysis
-    if n < 3:
-        return {"score": 0, "flags": [f"✅ Only {n} transaction(s) — insufficient for bot analysis"], "evidence": {}}
+        return {"score": 0, "flags": ["✅ No transaction data"], "evidence": {}}
+    if n < 5:
+        return {"score": 0, "flags": [f"✅ Only {n} transaction(s) — not enough for bot analysis"], "evidence": {}}
 
     avg_iat = features["avg_inter_arrival"]
     cv_iat = features["cv_inter_arrival"]
@@ -246,59 +233,50 @@ def score_bot_behavior_ml(features: dict, txs: list) -> dict:
     top_prog_ratio = features["top_program_ratio"]
     pumpfun_ratio = features["pumpfun_ratio"]
 
-    # 1. Timing analysis
-    if avg_iat > 0:
-        if avg_iat < 5 and cv_iat < 0.5:
-            score += 45
-            flags.append(f"⚠️ Highly regular timing (avg {avg_iat:.1f}s, CV={cv_iat:.2f}) — strong bot signal")
-            evidence["timing_regularity"] = "HIGH"
-        elif avg_iat < 30:
-            score += 25
-            flags.append(f"⚠️ Fast transaction intervals (avg {avg_iat:.1f}s) — possible automation")
-            evidence["timing_regularity"] = "MEDIUM"
+    # Only flag if VERY strong signals
+    if avg_iat > 0 and avg_iat < 3 and cv_iat < 0.3:
+        score += 50
+        flags.append(f"⚠️ Extremely regular timing (avg {avg_iat:.1f}s, CV={cv_iat:.2f}) — strong bot signal")
+        evidence["timing"] = "HIGH"
+    elif avg_iat > 0 and avg_iat < 10 and cv_iat < 0.5:
+        score += 25
+        flags.append(f"⚠️ Fast regular timing (avg {avg_iat:.1f}s) — possible automation")
+        evidence["timing"] = "MEDIUM"
 
-    # 2. Burstiness (only meaningful with 5+ txs)
-    if n >= 5 and burstiness < -0.3:
+    if n >= 20 and burstiness < -0.5:
         score += 20
-        flags.append(f"⚠️ Non-bursty pattern (burstiness={burstiness:.2f}) — consistent with bots")
-        evidence["burstiness_score"] = burstiness
+        flags.append(f"⚠️ Non-bursty pattern (score={burstiness:.2f}) — automated behavior")
 
-    # 3. Program concentration (only with 10+ txs)
-    if n >= 10 and top_prog_ratio > 0.7:
+    if n >= 20 and top_prog_ratio > 0.8:
         score += 20
-        flags.append(f"⚠️ {top_prog_ratio*100:.0f}% calls to single program — automated pattern")
-        evidence["program_concentration"] = top_prog_ratio
+        flags.append(f"⚠️ {top_prog_ratio*100:.0f}% calls to one program — automated pattern")
 
-    # 4. Pump.fun ratio
-    if pumpfun_ratio > 0.3:
-        score += 20
-        flags.append(f"⚠️ {pumpfun_ratio*100:.0f}% Pump.fun interactions — memecoin bot")
-        evidence["pumpfun_activity"] = pumpfun_ratio
+    if pumpfun_ratio > 0.4:
+        score += 25
+        flags.append(f"⚠️ {pumpfun_ratio*100:.0f}% Pump.fun activity — memecoin bot")
 
-    # 5. Isolation Forest (only with 10+ txs)
+    # Isolation Forest only with 15+ transactions
     timestamps = [tx.get("timestamp", 0) for tx in txs
                   if isinstance(tx, dict) and tx.get("timestamp")]
-    if len(timestamps) >= 10:
-        iats = np.array([timestamps[i] - timestamps[i+1]
+    if len(timestamps) >= 15:
+        iats = np.array([abs(timestamps[i] - timestamps[i+1])
                          for i in range(len(timestamps)-1)])
-        iats = iats[iats >= 0]
-        if len(iats) >= 5:
+        if len(iats) >= 10:
             try:
                 iso = IsolationForest(contamination=0.1, random_state=42)
                 preds = iso.fit_predict(iats.reshape(-1, 1))
                 anomaly_ratio = float(np.mean(preds == -1))
-                evidence["isolation_forest_anomaly_ratio"] = anomaly_ratio
-                if anomaly_ratio < 0.05:
+                evidence["isolation_forest"] = anomaly_ratio
+                if anomaly_ratio < 0.03:
                     score += 15
-                    flags.append(f"⚠️ Isolation Forest: highly regular intervals detected")
-            except Exception as e:
-                print(f"IsolationForest error: {e}")
+                    flags.append("⚠️ Isolation Forest: highly regular intervals detected")
+            except:
+                pass
 
     if not flags:
-        flags.append("✅ No bot behavior detected — human-like activity")
+        flags.append("✅ No bot behavior detected — normal activity patterns")
 
     return {"score": min(score, 100), "flags": flags, "evidence": evidence}
-
 
 def score_wash_trading_ml(features: dict, txs: list) -> dict:
     score = 0
@@ -308,77 +286,46 @@ def score_wash_trading_ml(features: dict, txs: list) -> dict:
 
     if n == 0:
         return {"score": 0, "flags": ["✅ No transaction data"], "evidence": {}}
-
-    if n < 3:
-        return {"score": 0, "flags": [f"✅ Only {n} transaction(s) — insufficient for wash trading analysis"], "evidence": {}}
+    if n < 5:
+        return {"score": 0, "flags": [f"✅ Only {n} transaction(s) — not enough for wash trading analysis"], "evidence": {}}
 
     diversity = features["counterparty_diversity"]
     entropy = features["counterparty_entropy"]
     most_freq = features["most_frequent_ratio"]
     flow_ratio = features["flow_ratio"]
-    swap_ratio = features["swap_ratio"]
     std_tx = features["std_tx_size"]
     avg_tx = features["avg_tx_size"]
+    unique_cp = features["unique_counterparties"]
 
-    # 1. Counterparty entropy
-    max_entropy = np.log2(max(features["unique_counterparties"], 2))
+    # Only flag strong signals
+    max_entropy = np.log2(max(unique_cp, 2))
     normalized_entropy = entropy / max_entropy if max_entropy > 0 else 1.0
-    evidence["normalized_counterparty_entropy"] = normalized_entropy
+    evidence["entropy"] = normalized_entropy
 
-    if n >= 5:
-        if normalized_entropy < 0.3:
-            score += 35
-            flags.append(f"⚠️ Very low counterparty entropy ({normalized_entropy:.2f}) — circular trading")
-        elif normalized_entropy < 0.5:
-            score += 20
-            flags.append(f"⚠️ Low counterparty entropy ({normalized_entropy:.2f}) — limited partners")
+    # Need at least 10 txs for meaningful entropy analysis
+    if n >= 10 and normalized_entropy < 0.2:
+        score += 40
+        flags.append(f"⚠️ Extremely low counterparty entropy ({normalized_entropy:.2f}) — circular trading")
+    elif n >= 10 and normalized_entropy < 0.35:
+        score += 20
+        flags.append(f"⚠️ Low counterparty entropy ({normalized_entropy:.2f}) — limited partners")
 
-    # 2. Single counterparty dominance
-    if most_freq > 0.5 and n >= 5:
-        score += 25
-        flags.append(f"⚠️ Single counterparty = {most_freq*100:.0f}% of interactions — wash signal")
-        evidence["counterparty_dominance"] = most_freq
+    if most_freq > 0.7 and n >= 10:
+        score += 30
+        flags.append(f"⚠️ Single counterparty = {most_freq*100:.0f}% of interactions")
 
-    # 3. Flow ratio (balanced = circular)
-    if 0.8 < flow_ratio < 1.2 and n >= 10:
+    if 0.85 < flow_ratio < 1.15 and n >= 15 and avg_tx > 0.1:
         score += 15
-        flags.append(f"⚠️ Balanced flow ratio ({flow_ratio:.2f}) — funds cycling pattern")
-        evidence["flow_ratio"] = flow_ratio
+        flags.append(f"⚠️ Balanced flow ratio ({flow_ratio:.2f}) — funds cycling")
 
-    # 4. Uniform transaction sizes
-    if avg_tx > 0 and n >= 5 and std_tx / avg_tx < 0.1:
+    if avg_tx > 0.1 and n >= 10 and std_tx / avg_tx < 0.05:
         score += 15
-        flags.append(f"⚠️ Highly uniform transaction sizes — artificial volume")
-        evidence["size_uniformity"] = std_tx / avg_tx
-
-    # 5. Z-score on amounts
-    amounts = []
-    for tx in txs:
-        if not isinstance(tx, dict): continue
-        for transfer in tx.get("nativeTransfers", []):
-            amt = transfer.get("amount", 0) / 1e9
-            if amt > 0:
-                amounts.append(amt)
-
-    if len(amounts) >= 5:
-        X = np.array(amounts).reshape(-1, 1)
-        try:
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            z_scores = np.abs(X_scaled.flatten())
-            outlier_ratio = float(np.mean(z_scores > 2))
-            evidence["amount_outlier_ratio"] = outlier_ratio
-            if outlier_ratio < 0.05 and len(amounts) >= 10:
-                score += 10
-                flags.append("⚠️ Statistically uniform amounts — artificial pattern")
-        except Exception as e:
-            print(f"Wash scoring error: {e}")
+        flags.append("⚠️ Nearly identical transaction sizes — artificial pattern")
 
     if not flags:
-        flags.append("✅ No wash trading signals — organic patterns")
+        flags.append("✅ No wash trading signals — organic trading patterns")
 
     return {"score": min(score, 100), "flags": flags, "evidence": evidence}
-
 
 def score_rug_pull_ml(features: dict, txs: list, wallet: str) -> dict:
     score = 0
@@ -388,25 +335,23 @@ def score_rug_pull_ml(features: dict, txs: list, wallet: str) -> dict:
 
     if n == 0:
         return {"score": 0, "flags": ["✅ No transaction data"], "evidence": {}}
-
     if n < 2:
-        return {"score": 0, "flags": [f"✅ Only {n} transaction(s) — insufficient for rug pull analysis"], "evidence": {}}
+        return {"score": 0, "flags": [f"✅ Only {n} transaction(s) — not enough for analysis"], "evidence": {}}
 
-    flow_ratio = features["flow_ratio"]
+    total_outflow = features["total_outflow"]
+    total_inflow = features["total_inflow"]
     max_tx = features["max_tx_size"]
     avg_tx = features["avg_tx_size"]
     failed_ratio = features["failed_ratio"]
-    total_outflow = features["total_outflow"]
-    total_inflow = features["total_inflow"]
 
-    # 1. Extreme outflow detection via z-score
+    # Significant outflow detection
     outflow_amounts = []
     for tx in txs:
         if not isinstance(tx, dict): continue
         for transfer in tx.get("nativeTransfers", []):
             if transfer.get("fromUserAccount") == wallet:
                 amt = transfer.get("amount", 0) / 1e9
-                if amt > 0:
+                if amt > 0.01:
                     outflow_amounts.append(amt)
 
     if len(outflow_amounts) >= 3:
@@ -415,102 +360,84 @@ def score_rug_pull_ml(features: dict, txs: list, wallet: str) -> dict:
         std_out = np.std(arr)
         if std_out > 0:
             z_scores = (arr - mean_out) / std_out
-            extreme_outflows = int(np.sum(z_scores > 2))
-            evidence["extreme_outflow_count"] = extreme_outflows
-            if extreme_outflows > 0:
+            extreme = int(np.sum(z_scores > 2.5))
+            if extreme > 0:
                 score += 30
-                flags.append(f"⚠️ {extreme_outflows} statistically extreme outflow(s) detected (z>2σ)")
+                flags.append(f"⚠️ {extreme} statistically extreme outflow(s) detected")
+                evidence["extreme_outflows"] = extreme
 
-    # 2. Pure outflow
-    if total_outflow > 0 and total_inflow == 0:
+    # Pure outflow with meaningful amounts
+    if total_outflow > 1.0 and total_inflow == 0:
         score += 25
-        flags.append("⚠️ Pure outflow wallet — no incoming funds")
-        evidence["pure_outflow"] = True
-    elif flow_ratio > 5 and n >= 5:
+        flags.append(f"⚠️ Pure outflow wallet — {total_outflow:.2f} SOL out, nothing in")
+    elif total_outflow > 0 and total_inflow > 0 and flow_ratio > 8:
         score += 20
-        flags.append(f"⚠️ Outflow/inflow = {flow_ratio:.1f}x — heavily negative")
-        evidence["flow_ratio"] = flow_ratio
+        flags.append(f"⚠️ Heavy outflow dominance ({features['flow_ratio']:.1f}x ratio)")
 
-    # 3. Sudden large spike
-    if avg_tx > 0 and max_tx / avg_tx > 10:
+    # Spike detection
+    if avg_tx > 0.1 and max_tx / avg_tx > 15:
         score += 20
-        flags.append(f"⚠️ Max tx {max_tx:.2f} SOL = {max_tx/avg_tx:.0f}x average — sudden spike")
-        evidence["spike_ratio"] = max_tx / avg_tx
+        flags.append(f"⚠️ Sudden spike: max tx {max_tx:.2f} SOL = {max_tx/avg_tx:.0f}x average")
 
-    # 4. Failed transactions
-    if failed_ratio > 0.2 and n >= 5:
+    # Failed txs
+    if failed_ratio > 0.3 and n >= 10:
         score += 15
-        flags.append(f"⚠️ {failed_ratio*100:.0f}% failed transactions — possible exploit attempts")
-        evidence["failed_ratio"] = failed_ratio
+        flags.append(f"⚠️ {failed_ratio*100:.0f}% failed transactions")
 
-    # 5. New wallet with large outflows
+    # New wallet with outflows
     timestamps = [tx.get("timestamp", 0) for tx in txs
-                  if isinstance(tx, dict) and tx.get("timestamp") and tx.get("timestamp") > 0]
+                  if isinstance(tx, dict) and tx.get("timestamp", 0) > 0]
     if timestamps:
         age_days = (max(timestamps) - min(timestamps)) / 86400
-        evidence["wallet_age_days"] = age_days
-        if age_days < 7 and total_outflow > 10:
-            score += 20
-            flags.append(f"⚠️ New wallet ({age_days:.1f} days) with {total_outflow:.1f} SOL outflow")
+        if age_days < 3 and total_outflow > 5:
+            score += 25
+            flags.append(f"⚠️ New wallet ({age_days:.1f} days) draining {total_outflow:.1f} SOL")
 
     if not flags:
-        flags.append("✅ No rug pull signals detected")
+        flags.append("✅ No rug pull signals — normal outflow patterns")
 
     return {"score": min(score, 100), "flags": flags, "evidence": evidence}
 
-
-# ── PROFILE CLASSIFIER ────────────────────────────────────────────────────────
-
 def classify_wallet(features: dict, rug: dict, wash: dict, bot: dict) -> dict:
-    if not features or features.get("n_transactions", 0) == 0:
-        return {"type": "Unknown", "emoji": "❓", "description": "No transaction data found", "confidence": 0}
-
     n = features.get("n_transactions", 0)
 
-    # With very few transactions, default to unknown
+    if n == 0:
+        return {"type": "Empty Wallet", "emoji": "🈳", "description": "No transactions found for this address", "confidence": 0}
     if n < 3:
-        return {
-            "type": "New / Inactive",
-            "emoji": "🆕",
-            "description": f"Only {n} transaction(s) found — insufficient data for classification",
-            "confidence": 0
-        }
+        return {"type": "New / Inactive", "emoji": "🆕", "description": f"Only {n} transaction(s) found — very new or rarely used wallet", "confidence": 20}
 
     rug_s = rug["score"]
     wash_s = wash["score"]
     bot_s = bot["score"]
+    final = round(rug_s * 0.4 + wash_s * 0.35 + bot_s * 0.25)
     swap_r = features.get("swap_ratio", 0)
     pumpfun_r = features.get("pumpfun_ratio", 0)
-    diversity = features.get("counterparty_diversity", 1)
 
-    # Use ACTUAL scores not hardcoded thresholds
-    final_score = round(rug_s * 0.4 + wash_s * 0.35 + bot_s * 0.25)
+    # Confidence based on data quality
+    confidence = min(int(20 + (n / 100) * 60 + (final / 100) * 20), 95)
 
-    if bot_s >= 60:
-        return {"type": "Bot / Automated", "emoji": "🤖", "description": "Automated trading patterns with regular timing", "confidence": min(bot_s, 95)}
-    elif wash_s >= 50:
-        return {"type": "Wash Trader", "emoji": "🔄", "description": "Suspicious circular trading with low diversity", "confidence": min(wash_s, 95)}
-    elif rug_s >= 60:
-        return {"type": "High Risk Actor", "emoji": "🚨", "description": "Multiple high-risk signals detected", "confidence": min(rug_s, 95)}
-    elif pumpfun_r > 0.3:
-        return {"type": "Memecoin Trader", "emoji": "🎰", "description": "Heavy Pump.fun trading activity", "confidence": 70}
-    elif swap_r > 0.3:
-        return {"type": "DeFi Trader", "emoji": "💱", "description": "Active DeFi participant with frequent swaps", "confidence": 75}
-    elif final_score >= 40:
-        return {"type": "Medium Risk", "emoji": "⚠️", "description": "Some suspicious patterns detected", "confidence": 60}
-    elif n >= 20:
-        return {"type": "Active User", "emoji": "👤", "description": "Regular wallet with consistent activity", "confidence": 70}
+    if bot_s >= 65:
+        return {"type": "Bot / Automated", "emoji": "🤖", "description": "High-frequency automated trading with regular timing patterns", "confidence": confidence}
+    elif wash_s >= 55:
+        return {"type": "Wash Trader", "emoji": "🔄", "description": "Suspicious circular trading with low counterparty diversity", "confidence": confidence}
+    elif rug_s >= 65:
+        return {"type": "High Risk Actor", "emoji": "🚨", "description": "Multiple high-risk signals including extreme outflows", "confidence": confidence}
+    elif pumpfun_r > 0.4:
+        return {"type": "Memecoin Trader", "emoji": "🎰", "description": "Heavy Pump.fun and memecoin trading activity", "confidence": confidence}
+    elif swap_r > 0.4:
+        return {"type": "DeFi Trader", "emoji": "💱", "description": "Active DeFi participant with frequent token swaps", "confidence": confidence}
+    elif final >= 40:
+        return {"type": "Moderate Risk", "emoji": "⚠️", "description": "Some suspicious patterns detected — use caution", "confidence": confidence}
+    elif n >= 30:
+        return {"type": "Active User", "emoji": "👤", "description": "Regular wallet with healthy diverse activity", "confidence": confidence}
     else:
-        return {"type": "Casual User", "emoji": "🟢", "description": "Low activity, typical retail behavior", "confidence": 65}
-
-
-# ── HELPERS ───────────────────────────────────────────────────────────────────
+        return {"type": "Casual User", "emoji": "🟢", "description": "Low-frequency wallet with typical retail behavior", "confidence": confidence}
 
 def get_activity_timeline(txs: list) -> list:
     if not txs: return []
     daily = {}
     for tx in txs:
-        if isinstance(tx, dict) and tx.get("timestamp") and tx.get("timestamp") > 0:
+        if isinstance(tx, dict) and tx.get("timestamp") and int(tx.get("timestamp", 0)) > 0:
             day = datetime.fromtimestamp(int(tx["timestamp"])).strftime("%Y-%m-%d")
             daily[day] = daily.get(day, 0) + 1
     return [{"date": d, "count": c} for d, c in sorted(daily.items())[-14:]]
@@ -519,20 +446,20 @@ def get_top_counterparties(txs: list, wallet: str) -> list:
     counts = {}
     for tx in txs:
         if not isinstance(tx, dict): continue
+        # Native transfers (only meaningful amounts)
         for transfer in tx.get("nativeTransfers", []):
-            for key in ["toUserAccount", "fromUserAccount"]:
-                addr = transfer.get(key, "")
-                if addr and addr != wallet:
-                    counts[addr] = counts.get(addr, 0) + 1
+            amt = transfer.get("amount", 0) / 1e9
+            if amt > 0.01:
+                for key in ["toUserAccount", "fromUserAccount"]:
+                    addr = transfer.get(key, "")
+                    if addr and addr != wallet:
+                        counts[addr] = counts.get(addr, 0) + 1
+        # Token transfers
         for transfer in tx.get("tokenTransfers", []):
             for key in ["toUserAccount", "fromUserAccount"]:
                 addr = transfer.get(key, "")
                 if addr and addr != wallet:
                     counts[addr] = counts.get(addr, 0) + 1
-        for acc in tx.get("accountData", []):
-            addr = acc.get("account", "")
-            if addr and addr != wallet and acc.get("nativeBalanceChange", 0) != 0:
-                counts[addr] = counts.get(addr, 0) + 1
     top = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:5]
     return [{"address": a[:8] + "..." + a[-4:], "full": a, "interactions": c} for a, c in top]
 
@@ -542,15 +469,16 @@ def get_tx_type_breakdown(txs: list) -> dict:
         if not isinstance(tx, dict): continue
         tx_type = tx.get("type", "UNKNOWN")
         readable = {
-            "UNKNOWN": "Complex DeFi",
-            "TRANSFER": "SOL Transfer",
-            "SWAP": "Token Swap",
-            "NFT_SALE": "NFT Sale",
-            "NFT_MINT": "NFT Mint",
-            "NFT_BID": "NFT Bid",
-            "BURN": "Token Burn",
-            "STAKE_SOL": "SOL Staking",
-        }.get(tx_type, tx_type)
+            "TRANSFER": "💸 SOL Transfer",
+            "SWAP": "🔄 Token Swap",
+            "NFT_SALE": "🎨 NFT Sale",
+            "NFT_MINT": "🖼️ NFT Mint",
+            "NFT_BID": "🏷️ NFT Bid",
+            "BURN": "🔥 Token Burn",
+            "STAKE_SOL": "📈 SOL Staking",
+            "UNSTAKE_SOL": "📉 SOL Unstaking",
+            "UNKNOWN": "⚙️ Complex DeFi",
+        }.get(tx_type, f"📋 {tx_type}")
         types[readable] += 1
     return dict(types.most_common(6))
 
@@ -562,21 +490,18 @@ def get_risk_label(score: int) -> str:
 def calculate_final_score(rug: dict, wash: dict, bot: dict) -> int:
     return min(round(rug["score"] * 0.4 + wash["score"] * 0.35 + bot["score"] * 0.25), 100)
 
-
-# ── API ENDPOINTS ─────────────────────────────────────────────────────────────
-
 @app.get("/")
 def root():
-    return {"message": "SolSight ML API v4.0", "models": ["IsolationForest", "ZScore", "Entropy", "Burstiness"]}
+    return {"message": "SolSight ML API v4.0", "status": "running"}
 
 @app.get("/analyze/{wallet}")
 def analyze_wallet(wallet: str):
     txs = get_transactions(wallet)
-    actual_count = len(txs)  # REAL count
+    actual_count = len(txs)
     balance = get_sol_balance(wallet)
-    age = get_wallet_age(txs)  # REAL timestamps
-
+    age = get_wallet_age(txs)
     features = extract_features(txs, wallet)
+
     rug = score_rug_pull_ml(features, txs, wallet)
     wash = score_wash_trading_ml(features, txs)
     bot = score_bot_behavior_ml(features, txs)
@@ -594,8 +519,8 @@ def analyze_wallet(wallet: str):
         "risk_score": final_score,
         "risk_label": label,
         "sol_balance": balance,
-        "transaction_count": actual_count,  # REAL count
-        "wallet_age": age,  # REAL timestamps
+        "transaction_count": actual_count,
+        "wallet_age": age,
         "profile": profile,
         "features": {
             "burstiness": round(features.get("burstiness", 0), 3),
@@ -615,7 +540,7 @@ def analyze_wallet(wallet: str):
         "top_counterparties": counterparties,
         "all_flags": all_flags,
         "solscan_url": f"https://solscan.io/account/{wallet}",
-        "summary": f"Analyzed {actual_count} actual transactions. Classified as '{profile['type']}'. Risk: {final_score}/100."
+        "summary": f"Analyzed {actual_count} actual transactions. '{profile['type']}' wallet. Risk: {final_score}/100."
     }
 
 @app.get("/leaderboard")
@@ -641,11 +566,10 @@ def monitor_wallet(wallet: str):
     rug = score_rug_pull_ml(features, txs, wallet)
     wash = score_wash_trading_ml(features, txs)
     bot = score_bot_behavior_ml(features, txs)
-    final_score = calculate_final_score(rug, wash, bot)
     return {
         "wallet": wallet,
-        "risk_score": final_score,
-        "risk_label": get_risk_label(final_score),
+        "risk_score": calculate_final_score(rug, wash, bot),
+        "risk_label": get_risk_label(calculate_final_score(rug, wash, bot)),
         "timestamp": datetime.now().isoformat(),
         "transaction_count": len(txs)
     }
@@ -659,14 +583,13 @@ def get_network(wallet: str):
 
     for tx in txs[:50]:
         if not isinstance(tx, dict): continue
-
         all_transfers = []
 
         for t in tx.get("nativeTransfers", []):
             src = t.get("fromUserAccount", "")
             dst = t.get("toUserAccount", "")
             amt = t.get("amount", 0) / 1e9
-            if src and dst:
+            if amt > 0.01 and src and dst:
                 all_transfers.append((src, dst, round(amt, 4), "SOL"))
 
         for t in tx.get("tokenTransfers", []):
@@ -674,7 +597,7 @@ def get_network(wallet: str):
             dst = t.get("toUserAccount", "")
             amt = t.get("tokenAmount", 0)
             if src and dst:
-                all_transfers.append((src, dst, round(float(amt), 2), "TOKEN"))
+                all_transfers.append((src, dst, round(float(amt or 0), 2), "TOKEN"))
 
         for src, dst, amt, type_ in all_transfers:
             if src != dst:
@@ -689,12 +612,7 @@ def get_network(wallet: str):
                 edge_id = f"{src}-{dst}"
                 if edge_id not in seen:
                     seen.add(edge_id)
-                    edges.append({
-                        "source": src,
-                        "target": dst,
-                        "amount": amt,
-                        "type": type_
-                    })
+                    edges.append({"source": src, "target": dst, "amount": amt, "type": type_})
 
     return {"nodes": nodes[:20], "edges": edges[:30]}
 
@@ -703,15 +621,11 @@ def debug_wallet(wallet: str):
     txs = get_transactions(wallet)
     if not txs:
         return {"count": 0, "sample": None}
-    sample = txs[0] if txs else {}
+    sample = txs[0]
     return {
         "actual_count": len(txs),
-        "first_tx_keys": list(sample.keys()) if sample else [],
         "first_tx_type": sample.get("type", "N/A"),
-        "native_transfers_count": len(sample.get("nativeTransfers", [])),
-        "token_transfers_count": len(sample.get("tokenTransfers", [])),
-        "account_data_count": len(sample.get("accountData", [])),
-        "sample_native": sample.get("nativeTransfers", [])[:2],
-        "sample_token": sample.get("tokenTransfers", [])[:2],
+        "native_transfers": sample.get("nativeTransfers", [])[:2],
+        "token_transfers": sample.get("tokenTransfers", [])[:2],
         "timestamp": sample.get("timestamp", "N/A"),
     }
