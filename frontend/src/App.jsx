@@ -209,7 +209,7 @@ ${[["🪤 Rug Pull",r.breakdown.rug_pull_risk.score],["🔄 Wash Trading",r.brea
 ${r.all_flags.map(f=>`<div class="flag ${f.startsWith("✅")?"fo":"fw"}">${f}</div>`).join("")}</div>
 <div class="card"><div class="st">Transaction Types</div>
 ${Object.entries(r.tx_type_breakdown).map(([t,c])=>`<div class="row"><span>${t}</span><span class="val">${c} txns</span></div>`).join("")}</div>
-<div class="footer">SolSight v4.0 • Solana Frontier Hackathon 2026 • <a href="${r.solscan_url}">View on Solscan →</a></div>
+<div class="footer">SolSight v4.0 • <a href="${r.solscan_url}">View on Solscan →</a></div>
 </body></html>`;
     const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
@@ -244,7 +244,7 @@ ${Object.entries(r.tx_type_breakdown).map(([t,c])=>`<div class="row"><span>${t}<
       <section style={{ maxWidth: "1200px", margin: "0 auto", padding: "100px 60px 80px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "80px", alignItems: "center" }}>
         <div>
           <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", background: "#9945FF18", border: "1px solid #9945FF44", borderRadius: "999px", padding: "6px 16px", fontSize: "12px", color: "#9945FF", marginBottom: "28px" }}>
-            🏆 Solana Frontier Hackathon 2026
+            🏆 SolSiight
           </div>
           <h1 style={{ fontSize: "56px", fontWeight: "900", lineHeight: 1.1, margin: "0 0 24px 0", color: "#fff" }}>
             Know Who You're<br />
@@ -390,7 +390,7 @@ ${Object.entries(r.tx_type_breakdown).map(([t,c])=>`<div class="row"><span>${t}<
 
       <footer style={{ borderTop: "1px solid #1e2035", padding: "32px 60px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: "16px", fontWeight: "900", background: "linear-gradient(90deg,#9945FF,#14F195)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>⬡ SolSight</div>
-        <div style={{ color: "#333", fontSize: "13px" }}>SolSight v4.0 • Solana Frontier Hackathon 2026</div>
+        <div style={{ color: "#333", fontSize: "13px" }}>SolSight v4.0 </div>
         <div style={{ color: "#333", fontSize: "13px" }}>Powered by Helius API</div>
       </footer>
     </div>
@@ -763,7 +763,7 @@ ${Object.entries(r.tx_type_breakdown).map(([t,c])=>`<div class="row"><span>${t}<
 
       <footer style={{ borderTop: "1px solid #1e2035", padding: "24px 40px", display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "20px" }}>
         <div style={{ fontSize: "14px", fontWeight: "900", background: "linear-gradient(90deg,#9945FF,#14F195)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>⬡ SolSight</div>
-        <div style={{ color: "#333", fontSize: "12px" }}>SolSight v4.0 • Solana Frontier Hackathon 2026</div>
+        <div style={{ color: "#333", fontSize: "12px" }}>SolSight v4.0 </div>
         <div style={{ color: "#333", fontSize: "12px" }}>Powered by Helius API</div>
       </footer>
     </div>
